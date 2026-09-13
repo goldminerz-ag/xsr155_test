@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Yamaha XSR155 Shift Alert</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background-color: #121212;
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 20px;
+      box-sizing: border-box;
+    }
+    .card {
+      background: #1e1e1e;
+      border-radius: 16px;
+      padding: 24px;
+      width: 100%;
+      max-width: 360px;
+      text-align: center;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+    .rpm-display {
+      font-size: 56px;
+      font-weight: 800;
+      margin: 16px 0;
+      color: #00e676;
+      transition: color 0.1s;
+    }
+    .rpm-display.alert {
+      color: #ff1744;
+      animation: pulse 0.4s infinite alternate;
+    }
+    @keyframes pulse {
+      from { transform: scale(1); }
+      to { transform: scale(1.08); }
+    }
+    .status {
+      font-size: 14px;
+      color: #aaa;
+      margin-bottom: 20px;
+    }
+    .input-group {
+      margin-bottom: 20px;
+      text-align: left;
+    }
+    label {
+      font-size: 13px;
+      color: #bbb;
+      display: block;
+      margin-bottom: 6px;
+    }
+    input {
+      width: 100%;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid #333;
+      background: #2a2a2a;
+      color: #fff;
+      font-size: 16px;
+      box-sizing: border-box;
+    }
+    button {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 10px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      background: #2979ff;
+      color: #fff;
+      transition: background 0.2s;
+    }
+    button:disabled {
+      background: #444;
+      color: #777;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <h2>XSR155 Shift Assistant</h2>
+    <div class="status" id="statusText">Disconnected</div>
+    
+    <div class="rpm-display" id="rpmDisplay">0</div>
+    <div style="font-size: 13px; color: #888; margin-top: -10px; margin-bottom: 20px;">ENGINE RPM</div>
+
+    <div class="input-group">
+      <label for="thresholdInput">Shift RPM Limit:</label>
+      <input type="number" id="thresholdInput" value="5500" step="100" />
+    </div>
+
+    <button id="connectBtn">Connect to Bike</button>
+  </div>
+
+  <script>
+    const UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+    const NOTIFY_CHAR_UUID  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+    let audioCtx = null;
+    let lastBeepTime = 0;
+
+    const connectBtn = document.getElementById("connectBtn");
+    const statusText = document.getElementById("statusText");
+    const rpmDisplay = document.getElementById("rpmDisplay");
+    const thresholdInput = document.getElementById("thresholdInput");
+
+    // Synthesize alert beep through helmet Bluetooth/earphones
+    function playAlertTone() {
+      const now = Date.now();
+      if (now - lastBeepTime < 350) return; // Debounce to prevent overlapping beeps
+      lastBeepTime = now;
+
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(1000, audioCtx.currentTime); // 1 kHz pitch
+      gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.15);
+    }
+
+    function handleCharacteristicValueChanged(event) {
+      const value = event.target.value;
+      if (value.byteLength < 7) return;
+
+      const header = value.getUint8(0);
+      // Process telemetry packets prefixed with 0x55
+      if (header === 0x55) {
+        // Bytes 5 and 6 form the 16-bit big-endian RPM
+        const rpm = (value.getUint8(5) << 8) | value.getUint8(6);
+        const threshold = parseInt(thresholdInput.value, 10) || 5500;
+
+        rpmDisplay.textContent = rpm.toLocaleString();
+
+        if (rpm >= threshold) {
+          rpmDisplay.classList.add("alert");
+          playAlertTone();
+        } else {
+          rpmDisplay.classList.remove("alert");
+        }
+      }
+    }
+
+    connectBtn.addEventListener("click", async () => {
+      try {
+        // Initialize AudioContext on user gesture to comply with browser autoplay policy
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        await audioCtx.resume();
+
+        statusText.textContent = "Scanning...";
+        
+        // Scan specifically for Yamaha CCU device or services
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [
+            { namePrefix: "YSCCU" },
+            { services: [UART_SERVICE_UUID] }
+          ],
+          optionalServices: [UART_SERVICE_UUID]
+        });
+
+        statusText.textContent = "Connecting to GATT Server...";
+        device.addEventListener("gattserverdisconnected", () => {
+          statusText.textContent = "Disconnected";
+          connectBtn.disabled = false;
+          rpmDisplay.textContent = "0";
+          rpmDisplay.classList.remove("alert");
+        });
+
+        const server = await device.gatt.connect();
+
+        statusText.textContent = "Getting Nordic UART Service...";
+        const service = await server.getPrimaryService(UART_SERVICE_UUID);
+
+        statusText.textContent = "Subscribing to telemetry...";
+        const characteristic = await service.getCharacteristic(NOTIFY_CHAR_UUID);
+        
+        await characteristic.startNotifications();
+        characteristic.addEventListener("characteristicvaluechanged", handleCharacteristicValueChanged);
+
+        statusText.textContent = `Connected: ${device.name || "Yamaha CCU"}`;
+        connectBtn.disabled = true;
+
+      } catch (error) {
+        console.error("Bluetooth error:", error);
+        statusText.textContent = `Error: ${error.message || error}`;
+      }
+    });
+  </script>
+</body>
+</html>
